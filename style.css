@@ -26,12 +26,33 @@ header {
   border-bottom: 2px solid var(--cyan);
 }
 
+.header-left {
+  width: 100px;
+}
+
 .title {
   flex-grow: 1;
   text-align: center;
   font-size: 2em;
   font-weight: 600;
   color: var(--cyan);
+}
+
+.header-right {
+  width: 100px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.ptu-logo {
+  height: 80px;
+  width: auto;
+  transition: transform 0.3s ease;
+}
+
+.ptu-logo:hover {
+  transform: scale(1.05);
 }
 
 nav {
@@ -110,6 +131,14 @@ section p, section li {
 @media (max-width: 500px) {
   .controls {
     grid-template-columns: 1fr;
+  }
+  
+  .ptu-logo {
+    height: 60px;
+  }
+  
+  .title {
+    font-size: 1.5em;
   }
 }
 
