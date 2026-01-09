@@ -406,3 +406,18 @@ section p, section li {
   background: var(--cyan);
   color: var(--dark-navy);
 }
+
+.quantization-levels-box {
+  background: var(--dark-navy);
+  border: 2px solid var(--cyan);
+  border-radius: 8px;
+  padding: 15px;
+  min-width: 180px;
+  max-height: 400px;
+  overflow-y: auto;
+  display: none;
+}
+
+.quantization-levels-box.visible {
+  display: block;
+}
