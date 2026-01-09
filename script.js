@@ -153,7 +153,6 @@ function generatePretest() {
     container.appendChild(questionCard);
   });
   
-  // Add click handlers to options
   document.querySelectorAll('#pretestContainer .option').forEach(opt => {
     opt.addEventListener('click', function() {
       const radio = this.querySelector('input[type="radio"]');
@@ -201,7 +200,6 @@ function submitPretest() {
     return;
   }
   
-  // Show results
   const percentage = (score / pretestData.length * 100).toFixed(0);
   document.getElementById('pretestScoreDisplay').textContent = `${score} / ${pretestData.length}`;
   document.getElementById('pretestResultMessage').innerHTML = `
@@ -246,7 +244,6 @@ function generateQuiz() {
     container.appendChild(questionCard);
   });
   
-  // Add click handlers to options
   document.querySelectorAll('.option').forEach(opt => {
     opt.addEventListener('click', function() {
       const radio = this.querySelector('input[type="radio"]');
@@ -294,7 +291,6 @@ function submitQuiz() {
     return;
   }
   
-  // Show results
   const percentage = (score / quizData.length * 100).toFixed(0);
   document.getElementById('scoreDisplay').textContent = `${score} / ${quizData.length}`;
   document.getElementById('resultMessage').innerHTML = `
@@ -304,7 +300,6 @@ function submitQuiz() {
   document.getElementById('quizResult').classList.add('show');
   document.getElementById('submitQuiz').disabled = true;
   
-  // Scroll to results
   document.getElementById('quizResult').scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
@@ -441,6 +436,47 @@ function createStemPlot(ts, xs) {
   };
 }
 
+function getGridLayout(A, L) {
+  const delta = (2 * A) / L;
+  const yGridValues = [];
+  for (let i = 0; i <= L; i++) {
+    yGridValues.push(-A + i * delta);
+  }
+  
+  return {
+    yGridValues: yGridValues,
+    delta: delta
+  };
+}
+
+function updateQuantizationLevelsDisplay(A, L, enc) {
+  const delta = (2 * A) / L;
+  const levelsTable = document.getElementById('levelsTable');
+  let html = '<table style="width: 100%; color: #e0e0e0; font-size: 12px; border-collapse: collapse;">';
+  html += '<tr style="border-bottom: 1px solid var(--cyan); color: var(--cyan); font-weight: bold;"><th style="padding: 5px;">Level</th><th style="padding: 5px;">Voltage (V)</th><th style="padding: 5px;">Code</th></tr>';
+  
+  for (let i = L - 1; i >= 0; i--) {
+    const voltage = (-A + (i + 0.5) * delta).toFixed(3);
+    const binaryCode = i.toString(2).padStart(Math.ceil(Math.log2(L)), '0');
+    const grayCode = (i ^ (i >> 1)).toString(2).padStart(Math.ceil(Math.log2(L)), '0');
+    const code = enc === 'gray' ? grayCode : binaryCode;
+    
+    html += `<tr style="border-bottom: 1px solid rgba(0, 217, 255, 0.1);">
+      <td style="padding: 5px; text-align: center; color: var(--cyan);">${i}</td>
+      <td style="padding: 5px; text-align: center;">${voltage}</td>
+      <td style="padding: 5px; text-align: center; font-family: monospace; color: #ffaa00;">${code}</td>
+    </tr>`;
+  }
+  
+  html += '</table>';
+  html += `<div style="margin-top: 10px; padding: 8px; background: var(--navy); border-radius: 4px; font-size: 11px; text-align: center;">
+    <div style="color: var(--cyan); font-weight: bold;">Step Size (Δ)</div>
+    <div style="color: #ffaa00; font-size: 14px; margin-top: 3px;">${delta.toFixed(4)} V</div>
+  </div>`;
+  
+  levelsTable.innerHTML = html;
+}
+
 function updatePlots() {
   const A = +msgAmp.value;
   const fm = +msgFreq.value;
@@ -468,6 +504,8 @@ function updatePlots() {
     statusDiv.style.borderRadius = '4px';
   }
 
+  updateQuantizationLevelsDisplay(A, L, enc);
+
   const Fs = 8000;
   const { t, x } = generateSignal(A, fm, Fs, signalType);
   const { ts, xs } = sampleSignal(t, x, Fs, Fsamp);
@@ -478,8 +516,49 @@ function updatePlots() {
   const encoded = encode(levelsSample, L, enc);
   const xr = reconstruct(qSample, ts, t);
 
+  const gridLayout = getGridLayout(A, L);
+  
   const mode1 = document.querySelector(".ch1-btn.active").dataset.type;
+  
+  // Show/hide quantization levels box
+  const quantBox = document.getElementById('quantLevelsDisplay');
+  if (mode1 === "quantized") {
+    quantBox.classList.add('visible');
+  } else {
+    quantBox.classList.remove('visible');
+  }
+  
   let d1 = [];
+  let layout1 = {
+    margin: { t: 20 },
+    xaxis: { 
+      title: "",
+      tickmode: 'array',
+      tickvals: [t[0], t[t.length - 1]],
+      ticktext: ['Start', 'End'],
+      gridcolor: 'rgba(0, 217, 255, 0.15)',
+      gridwidth: 1
+    },
+    yaxis: { 
+      title: "Amplitude (V)",
+      tickmode: 'array',
+      tickvals: [A, A/2, 0, -A/2, -A],
+      ticktext: [
+        `${A.toFixed(1)}`,
+        `${(A/2).toFixed(1)}`,
+        '0',
+        `${(-A/2).toFixed(1)}`,
+        `${(-A).toFixed(1)}`
+      ],
+      gridcolor: 'rgba(0, 217, 255, 0.15)',
+      gridwidth: 1,
+      range: [-A * 1.1, A * 1.1]
+    },
+    plot_bgcolor: '#1a2332',
+    paper_bgcolor: '#1a2332',
+    font: { color: '#ffffff' },
+    shapes: []
+  };
 
   if (mode1 === "input") {
     d1 = [{
@@ -503,10 +582,25 @@ function updatePlots() {
       { x: t, y: x, mode: "lines", line: { color: "green", width: 2 }, name: 'Original' },
       { x: sx, y: sy, mode: "lines", line: { color: "red", width: 3, shape: "hv" }, name: 'Quantized' }
     ];
+    
+    // Add horizontal grid lines for quantization levels
+    layout1.shapes = gridLayout.yGridValues.map(yVal => ({
+      type: 'line',
+      x0: t[0],
+      x1: t[t.length - 1],
+      y0: yVal,
+      y1: yVal,
+      line: {
+        color: 'rgba(0, 217, 255, 0.15)',
+        width: 1,
+        dash: 'dot'
+      }
+    }));
   }
   else if (mode1 === "encoded") {
     const bits = encoded.join("").split("").map(b => +b);
     const time = bits.map((_, i) => i / bits.length);
+    
     d1 = [{
       x: time,
       y: bits,
@@ -514,16 +608,59 @@ function updatePlots() {
       line: { shape: 'hv', color: 'magenta' },
       name: 'Encoded'
     }];
+    
+    layout1.yaxis = {
+      title: "Bit Value",
+      tickmode: 'array',
+      tickvals: [0, 1],
+      ticktext: ['0', '1'],
+      gridcolor: 'rgba(0, 217, 255, 0.15)'
+    };
+
+    layout1.xaxis = {
+      title: "Normalized Time",
+      tickmode: 'array',
+      tickvals: [0, 1],
+      ticktext: ['Start', 'End'],
+      range: [-0.05, 1.05],
+      gridcolor: 'rgba(0, 217, 255, 0.15)',
+      gridwidth: 1
+    };
   }
 
-  Plotly.react("plot1", d1, { 
-    margin: { t: 20 },
-    xaxis: { title: "Time (s)" },
-    yaxis: { title: "Amplitude (V)" }
-  });
+  Plotly.react("plot1", d1, layout1);
 
   const mode2 = document.querySelector(".ch2-btn.active").dataset.type;
   let d2 = [];
+  let layout2 = {
+    margin: { t: 20 },
+    xaxis: { 
+      title: "",
+      tickmode: 'array',
+      tickvals: [t[0], t[t.length - 1]],
+      ticktext: ['Start', 'End'],
+      gridcolor: 'rgba(0, 217, 255, 0.15)',
+      gridwidth: 1
+    },
+    yaxis: { 
+      title: "Amplitude (V)",
+      tickmode: 'array',
+      tickvals: [A, A/2, 0, -A/2, -A],
+      ticktext: [
+        `${A.toFixed(1)}`,
+        `${(A/2).toFixed(1)}`,
+        '0',
+        `${(-A/2).toFixed(1)}`,
+        `${(-A).toFixed(1)}`
+      ],
+      gridcolor: 'rgba(0, 217, 255, 0.15)',
+      gridwidth: 1,
+      range: [-A * 1.1, A * 1.1]
+    },
+    plot_bgcolor: '#1a2332',
+    paper_bgcolor: '#1a2332',
+    font: { color: '#ffffff' }
+  };
 
   if (mode2 === "reconstructed") {
     d2 = [
@@ -543,11 +680,7 @@ function updatePlots() {
     ];
   }
 
-  Plotly.react("plot2", d2, {
-    margin: { t: 20 },
-    xaxis: { title: "Time (s)" },
-    yaxis: { title: "Amplitude (V)" }
-  });
+  Plotly.react("plot2", d2, layout2);
 }
 
 document.getElementById("simulateBtn").onclick = updatePlots;
