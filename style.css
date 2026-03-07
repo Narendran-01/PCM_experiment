@@ -683,7 +683,6 @@ section li {
   pointer-events: none;
 }
 
-/* Hide placeholder icon once a video src is present */
 .proc-video-wrap video[src] { display: block; }
 .proc-video-wrap video[src] ~ .proc-video-placeholder { display: none; }
 .proc-video-wrap video[src] ~ .proc-video-label { display: none; }
