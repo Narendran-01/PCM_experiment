@@ -1,18 +1,309 @@
-// Navigation
-document.querySelectorAll(".nav-link").forEach(a => {
-  a.onclick = e => {
+/* ===== Navigation ===== */
+document.querySelectorAll(".nav-link").forEach(function (a) {
+  a.onclick = function (e) {
     e.preventDefault();
-    document.querySelectorAll("section").forEach(s => s.classList.remove("active"));
-    document.querySelectorAll(".nav-link").forEach(x => x.classList.remove("active"));
-    const target = a.getAttribute("href").substring(1);
-    document.getElementById(target).classList.add("active");
+    document.querySelectorAll("section").forEach(function (s) { s.classList.remove("active"); });
+    document.querySelectorAll(".nav-link").forEach(function (x) { x.classList.remove("active"); });
+    document.getElementById(a.getAttribute("href").substring(1)).classList.add("active");
     a.classList.add("active");
     window.scrollTo({ top: 0, behavior: "smooth" });
+    if (a.getAttribute("href") === "#simulation") {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () { updatePlots(); });
+      });
+    }
   };
 });
 
-// Pre-Test Data
-const pretestData = [
+/* ===== Read Control Values ===== */
+function getMsgFreqHz() {
+  return parseFloat(document.getElementById('msgFreqSlider').value) *
+    parseFloat(document.getElementById('msgFreqUnit').value);
+}
+
+function getSampFreqHz() {
+  return parseFloat(document.getElementById('sampFreqSlider').value) *
+    parseFloat(document.getElementById('sampFreqUnit').value);
+}
+
+function getUnitText(id) {
+  var s = document.getElementById(id);
+  return s.options[s.selectedIndex].text;
+}
+
+/* ===== Live Labels ===== */
+document.getElementById('msgAmp').addEventListener('input', function () {
+  document.getElementById('ampDisplay').textContent = parseFloat(this.value).toFixed(1) + ' V';
+});
+
+function refreshMsgLabel() {
+  document.getElementById('msgFreqDisplay').textContent =
+    document.getElementById('msgFreqSlider').value + ' ' + getUnitText('msgFreqUnit');
+}
+
+function refreshSampLabel() {
+  document.getElementById('sampFreqDisplay').textContent =
+    document.getElementById('sampFreqSlider').value + ' ' + getUnitText('sampFreqUnit');
+}
+
+document.getElementById('msgFreqSlider').addEventListener('input', refreshMsgLabel);
+document.getElementById('msgFreqUnit').addEventListener('change', refreshMsgLabel);
+document.getElementById('sampFreqSlider').addEventListener('input', refreshSampLabel);
+document.getElementById('sampFreqUnit').addEventListener('change', refreshSampLabel);
+
+/* ===== DSP Helpers ===== */
+function grayEncode(n) {
+  return n ^ (n >> 1);
+}
+
+function generateSignal(A, fm, Fs, type) {
+  var N = Math.round(Fs * 0.04), t = [], x = [];
+  for (var i = 0; i < N; i++) t.push(i / Fs);
+  if (type === 'sine') {
+    t.forEach(function (v) { x.push(A * Math.sin(2 * Math.PI * fm * v)); });
+  } else if (type === 'cosine') {
+    t.forEach(function (v) { x.push(A * Math.cos(2 * Math.PI * fm * v)); });
+  } else {
+    var noise = t.map(function () { return Math.random() * 2 - 1; });
+    for (var k = 0; k < 3; k++) {
+      noise = noise.map(function (_, i, a) { return ((a[i - 1] || 0) + a[i] + (a[i + 1] || 0)) / 3; });
+    }
+    x = noise.map(function (v) { return v * A; });
+  }
+  return { t: t, x: x };
+}
+
+function sampleSignal(t, x, Fs, Fsamp) {
+  var step = Math.max(1, Math.floor(Fs / Fsamp)), ts = [], xs = [];
+  for (var i = 0; i < x.length; i += step) { ts.push(t[i]); xs.push(x[i]); }
+  return { ts: ts, xs: xs };
+}
+
+function quantizeSignal(xArr, L, A) {
+  var delta = (2 * A) / L, q = [], levels = [];
+  xArr.forEach(function (v) {
+    var lvl = Math.floor((v + A) / delta);
+    lvl = Math.max(0, Math.min(L - 1, lvl));
+    q.push(-A + (lvl + 0.5) * delta);
+    levels.push(lvl);
+  });
+  return { q: q, levels: levels };
+}
+
+function buildStaircase(t, q) {
+  var sx = [], sy = [];
+  for (var i = 0; i < q.length - 1; i++) {
+    sx.push(t[i]); sy.push(q[i]);
+    if (q[i] !== q[i + 1]) { sx.push(t[i + 1]); sy.push(q[i]); }
+  }
+  sx.push(t[t.length - 1]); sy.push(q[q.length - 1]);
+  return { sx: sx, sy: sy };
+}
+
+function encodeSignal(levels, L, enc) {
+  var nb = Math.ceil(Math.log2(Math.max(L, 2)));
+  return levels.map(function (l) {
+    return (enc === 'gray' ? grayEncode(l) : l).toString(2).padStart(nb, '0');
+  });
+}
+
+function buildZOH(ts, xs, t) {
+  var y = [], k = 0;
+  for (var i = 0; i < t.length; i++) {
+    if (k < ts.length - 1 && t[i] >= ts[k + 1]) k++;
+    y.push(xs[k]);
+  }
+  return y;
+}
+
+function stemTraces(ts, xs) {
+  var sx = [], sy = [];
+  ts.forEach(function (t, i) { sx.push(t, t, null); sy.push(0, xs[i], null); });
+  return {
+    stems: { x: sx, y: sy, mode: 'lines', line: { color: 'orange', width: 2 }, showlegend: false },
+    markers: { x: ts, y: xs, mode: 'markers', marker: { color: 'red', size: 8, symbol: 'circle' }, name: 'Samples' }
+  };
+}
+
+function baseLayout(A, t0, t1) {
+  return {
+    margin: { t: 20, b: 40, l: 60, r: 20 },
+    autosize: true,
+    xaxis: {
+      title: 'Time',
+      tickmode: 'array', tickvals: [t0, t1], ticktext: ['Start', 'End'],
+      gridcolor: 'rgba(0,217,255,0.15)', gridwidth: 1
+    },
+    yaxis: {
+      title: 'Amplitude (V)',
+      tickmode: 'array',
+      tickvals: [-A, -A / 2, 0, A / 2, A],
+      ticktext: [(-A).toFixed(1), (-A / 2).toFixed(1), '0', (A / 2).toFixed(1), A.toFixed(1)],
+      gridcolor: 'rgba(0,217,255,0.15)', gridwidth: 1, range: [-A * 1.2, A * 1.2]
+    },
+    plot_bgcolor: '#1a2332', paper_bgcolor: '#1a2332',
+    font: { color: '#ffffff' },
+    shapes: []
+  };
+}
+
+function updateQuantBox(A, L, enc) {
+  var delta = (2 * A) / L, nb = Math.ceil(Math.log2(Math.max(L, 2)));
+  var html = '<table style="width:100%;color:#e0e0e0;font-size:12px;border-collapse:collapse;">'
+    + '<tr style="border-bottom:1px solid var(--cyan);color:var(--cyan);font-weight:bold;">'
+    + '<th style="padding:5px;">Level</th><th style="padding:5px;">Voltage (V)</th><th style="padding:5px;">Code</th></tr>';
+  for (var i = L - 1; i >= 0; i--) {
+    var v = (-A + (i + 0.5) * delta).toFixed(3);
+    var c = (enc === 'gray' ? grayEncode(i) : i).toString(2).padStart(nb, '0');
+    html += '<tr style="border-bottom:1px solid rgba(0,217,255,0.1);">'
+      + '<td style="padding:5px;text-align:center;color:var(--cyan);">' + i + '</td>'
+      + '<td style="padding:5px;text-align:center;">' + v + '</td>'
+      + '<td style="padding:5px;text-align:center;font-family:monospace;color:#ffaa00;">' + c + '</td></tr>';
+  }
+  html += '</table><div style="margin-top:10px;padding:8px;background:var(--navy);border-radius:4px;font-size:11px;text-align:center;">'
+    + '<div style="color:var(--cyan);font-weight:bold;">Step Size</div>'
+    + '<div style="color:#ffaa00;font-size:14px;margin-top:3px;">' + delta.toFixed(4) + ' V</div></div>';
+  document.getElementById('levelsTable').innerHTML = html;
+}
+
+/* ===== Main Render ===== */
+function updatePlots() {
+  var A = parseFloat(document.getElementById('msgAmp').value) || 5;
+  var fm = getMsgFreqHz();
+  var Fsamp = getSampFreqHz();
+  var L = parseInt(document.getElementById('quantLevels').value) || 8;
+  var enc = document.getElementById('encodingType').value;
+  var type = document.getElementById('signalType').value;
+  if (!A || !fm || !Fsamp || !L) return;
+
+  var nyq = (2 * fm).toFixed(0), ratio = (Fsamp / fm).toFixed(2);
+  document.getElementById('ratioText').innerHTML =
+    '<strong>Fs/Fm Ratio:</strong> ' + ratio +
+    ' &nbsp;|&nbsp; <strong>Fs:</strong> ' + Fsamp.toLocaleString() + ' Hz' +
+    ' &nbsp;|&nbsp; <strong>Fm:</strong> ' + fm.toLocaleString() + ' Hz';
+
+  var sd = document.getElementById('nyquistStatus');
+  if (Fsamp < 2 * fm) {
+    sd.innerHTML = '<span style="color:#ff4444;font-weight:bold;">WARNING: Fs (' + Fsamp +
+      ' Hz) less than Nyquist rate (' + nyq + ' Hz). Aliasing will occur!</span>';
+    sd.style.background = 'rgba(220,53,69,0.15)';
+  } else {
+    sd.innerHTML = '<span style="color:#28a745;font-weight:bold;">Good: Fs meets Nyquist criterion (min ' +
+      nyq + ' Hz required)</span>';
+    sd.style.background = 'rgba(40,167,69,0.15)';
+  }
+
+  updateQuantBox(A, L, enc);
+
+  var Fs = 8000;
+  var sig = generateSignal(A, fm, Fs, type);
+  var t = sig.t, x = sig.x;
+  var samp = sampleSignal(t, x, Fs, Fsamp);
+  var ts = samp.ts, xs = samp.xs;
+  var qFull = quantizeSignal(x, L, A).q;
+  var qSampObj = quantizeSignal(xs, L, A);
+  var qSamp = qSampObj.q, lSamp = qSampObj.levels;
+  var encoded = encodeSignal(lSamp, L, enc);
+  var t0 = t[0], t1 = t[t.length - 1];
+
+  /* --- Channel 1 --- */
+  var m1 = document.querySelector('.ch1-btn.active').dataset.type;
+  var qBox = document.getElementById('quantLevelsDisplay');
+  qBox.classList.toggle('visible', m1 === 'quantized');
+  document.getElementById('ch1Wrapper').style.gridTemplateColumns = (m1 === 'quantized') ? '1fr 200px' : '1fr';
+
+  var d1 = [], lay1 = baseLayout(A, t0, t1);
+  if (m1 === 'input') {
+    d1 = [{ x: t, y: x, mode: 'lines', line: { color: '#00d9ff', width: 2 }, name: 'Input Signal' }];
+  } else if (m1 === 'sampled') {
+    var sp = stemTraces(ts, xs); d1 = [sp.stems, sp.markers];
+  } else if (m1 === 'quantized') {
+    var sc = buildStaircase(t, qFull);
+    var delta = (2 * A) / L, grid = [];
+    for (var gi = 0; gi <= L; gi++) grid.push(-A + gi * delta);
+    lay1.shapes = grid.map(function (yv) {
+      return { type: 'line', x0: t0, x1: t1, y0: yv, y1: yv, line: { color: 'rgba(0,217,255,0.2)', width: 1, dash: 'dot' } };
+    });
+    d1 = [
+      { x: t, y: x, mode: 'lines', line: { color: '#00d9ff', width: 2 }, name: 'Original' },
+      { x: sc.sx, y: sc.sy, mode: 'lines', line: { color: 'red', width: 3, shape: 'hv' }, name: 'Quantized' }
+    ];
+  } else if (m1 === 'encoded') {
+    var bits = encoded.join('').split('').map(Number);
+    var tb = bits.map(function (_, i) { return i / bits.length; });
+    d1 = [{ x: tb, y: bits, mode: 'lines', line: { shape: 'hv', color: 'magenta', width: 2 }, name: 'Encoded' }];
+    lay1.yaxis = { title: 'Bit Value', tickmode: 'array', tickvals: [0, 1], ticktext: ['0', '1'], range: [-0.2, 1.4], gridcolor: 'rgba(0,217,255,0.15)' };
+    lay1.xaxis = { title: 'Normalized Time', tickmode: 'array', tickvals: [0, 0.5, 1], ticktext: ['Start', 'Mid', 'End'], range: [-0.02, 1.02], gridcolor: 'rgba(0,217,255,0.15)' };
+  }
+
+  var ch1Container = document.querySelector('#ch1Wrapper .plot-container');
+  var plot1Width = ch1Container ? ch1Container.offsetWidth : 0;
+  if (plot1Width < 100) plot1Width = document.getElementById('simulation').offsetWidth - 60 || 800;
+  lay1.width = plot1Width;
+  lay1.height = 400;
+  Plotly.react('plot1', d1, lay1, { responsive: false, displayModeBar: true });
+
+  /* --- Channel 2 --- */
+  var m2 = document.querySelector('.ch2-btn.active').dataset.type;
+  var d2 = [], lay2 = baseLayout(A, t0, t1);
+  if (m2 === 'reconstructed') {
+    var xr = buildZOH(ts, qSamp, t);
+    d2 = [
+      { x: t, y: x, mode: 'lines', line: { color: '#00d9ff', width: 2 }, name: 'Original Signal' },
+      { x: t, y: xr, mode: 'lines', line: { color: 'orange', width: 2, dash: 'dash' }, name: 'Reconstructed' }
+    ];
+  } else if (m2 === 'decoded') {
+    var xd = buildZOH(ts, qSamp, t);
+    d2 = [{ x: t, y: xd, mode: 'lines', line: { shape: 'hv', color: 'red', width: 3 }, name: 'Decoded (DAC output)' }];
+  }
+
+  var plot2El = document.getElementById('plot2');
+  var plot2Width = plot2El ? plot2El.offsetWidth : 0;
+  if (plot2Width < 100) plot2Width = document.getElementById('simulation').offsetWidth - 60 || 800;
+  lay2.width = plot2Width;
+  lay2.height = 350;
+  Plotly.react('plot2', d2, lay2, { responsive: false, displayModeBar: true });
+}
+
+/* ===== Wire Buttons ===== */
+document.getElementById('simulateBtn').addEventListener('click', updatePlots);
+
+document.querySelectorAll('.ch1-btn').forEach(function (b) {
+  b.addEventListener('click', function () {
+    document.querySelectorAll('.ch1-btn').forEach(function (x) { x.classList.remove('active'); });
+    b.classList.add('active');
+    updatePlots();
+  });
+});
+
+document.querySelectorAll('.ch2-btn').forEach(function (b) {
+  b.addEventListener('click', function () {
+    document.querySelectorAll('.ch2-btn').forEach(function (x) { x.classList.remove('active'); });
+    b.classList.add('active');
+    updatePlots();
+  });
+});
+
+/* ===== Resize ===== */
+function onResize() {
+  if (document.getElementById('simulation').classList.contains('active')) updatePlots();
+}
+
+if (window.ResizeObserver) {
+  var ro = new ResizeObserver(function () {
+    clearTimeout(window._resizeTimer);
+    window._resizeTimer = setTimeout(onResize, 150);
+  });
+  ro.observe(document.getElementById('simulation'));
+}
+
+window.addEventListener('resize', function () {
+  clearTimeout(window._winResizeTimer);
+  window._winResizeTimer = setTimeout(onResize, 200);
+});
+
+/* ===== Quiz Data ===== */
+var pretestData = [
   {
     question: "If a fast-changing signal is sampled very slowly, what can be the expected outcome?",
     options: [
@@ -70,8 +361,7 @@ const pretestData = [
   }
 ];
 
-// Post-Test Data
-const quizData = [
+var quizData = [
   {
     question: "What happens to the output when the sampling frequency violates the Nyquist criterion?",
     options: [
@@ -81,7 +371,7 @@ const quizData = [
       "Quantization error becomes zero"
     ],
     correct: 2,
-    explanation: "When the sampling frequency is less than twice the message frequency, spectral overlapping occurs, known as aliasing. This causes distortion in the reconstructed signal, which can be clearly observed in the simulation."
+    explanation: "When Fs is less than 2*Fm, spectral overlapping (aliasing) occurs, distorting the reconstructed signal."
   },
   {
     question: "How does increasing the number of quantization levels affect quantization error?",
@@ -92,7 +382,7 @@ const quizData = [
       "Quantization error becomes infinite"
     ],
     correct: 2,
-    explanation: "Increasing the number of quantization levels reduces the quantization step size. As a result, the difference between the actual sample value and the quantized value decreases, thereby reducing quantization error."
+    explanation: "More levels mean smaller step size, so the quantization error decreases."
   },
   {
     question: "Why does the reconstructed signal not exactly match the original signal?",
@@ -103,18 +393,18 @@ const quizData = [
       "Due to higher bit rate"
     ],
     correct: 1,
-    explanation: "The reconstructed signal differs from the original signal due to quantization error and the use of finite sampling frequency. These limitations prevent perfect reconstruction of the analog signal."
+    explanation: "Quantization error and finite sampling prevent perfect reconstruction."
   },
   {
     question: "How is bit rate calculated in PCM?",
     options: [
-      "Bit rate = Sampling frequency × Quantization levels",
-      "Bit rate = Message frequency × Bits per sample",
-      "Bit rate = Sampling frequency × Bits per sample",
-      "Bit rate = Quantization error × Sampling frequency"
+      "Bit rate = Sampling frequency x Quantization levels",
+      "Bit rate = Message frequency x Bits per sample",
+      "Bit rate = Sampling frequency x Bits per sample",
+      "Bit rate = Quantization error x Sampling frequency"
     ],
     correct: 2,
-    explanation: "Bit rate in PCM is calculated as the product of sampling frequency and number of bits per sample. Bits per sample are determined using log2 of the number of quantization levels."
+    explanation: "Bit rate = Fs x n, where n = log2(L) bits per sample."
   },
   {
     question: "From the simulation results, explain the trade-off between bit rate and signal quality.",
@@ -125,580 +415,124 @@ const quizData = [
       "Bit rate has no effect on signal quality"
     ],
     correct: 2,
-    explanation: "Increasing the bit rate improves signal quality by reducing quantization error and improving resolution. However, it also increases bandwidth requirements, resulting in a trade-off between quality and bandwidth efficiency."
+    explanation: "More bits improve resolution but increase bandwidth requirements."
   }
 ];
 
-// Generate Pre-Test
-function generatePretest() {
-  const container = document.getElementById('pretestContainer');
-  container.innerHTML = '';
-  
-  pretestData.forEach((q, index) => {
-    const questionCard = document.createElement('div');
-    questionCard.className = 'question-card';
-    questionCard.innerHTML = `
-      <div class="question-number">Question ${index + 1}</div>
-      <div class="question-text">${q.question}</div>
-      <div class="options">
-        ${q.options.map((opt, i) => `
-          <div class="option" data-question="${index}" data-option="${i}">
-            <input type="radio" name="pq${index}" id="pq${index}_${i}" value="${i}">
-            <label for="pq${index}_${i}">${opt}</label>
-          </div>
-        `).join('')}
-      </div>
-      <div class="feedback" id="preFeedback${index}"></div>
-    `;
-    container.appendChild(questionCard);
+/* ===== Quiz Helpers ===== */
+function buildQuiz(data, containerId, prefix) {
+  var c = document.getElementById(containerId);
+  c.innerHTML = '';
+  data.forEach(function (q, i) {
+    var card = document.createElement('div');
+    card.className = 'question-card';
+    card.innerHTML =
+      '<div class="question-number">Question ' + (i + 1) + '</div>'
+      + '<div class="question-text">' + q.question + '</div>'
+      + '<div class="options">' + q.options.map(function (o, j) {
+        return '<div class="option" data-question="' + i + '" data-option="' + j + '">'
+          + '<input type="radio" name="' + prefix + i + '" id="' + prefix + i + '_' + j + '" value="' + j + '">'
+          + '<label for="' + prefix + i + '_' + j + '">' + o + '</label></div>';
+      }).join('') + '</div>'
+      + '<div class="feedback" id="' + prefix + 'fb' + i + '"></div>';
+    c.appendChild(card);
   });
-  
-  document.querySelectorAll('#pretestContainer .option').forEach(opt => {
-    opt.addEventListener('click', function() {
-      const radio = this.querySelector('input[type="radio"]');
-      radio.checked = true;
-    });
+  c.querySelectorAll('.option').forEach(function (o) {
+    o.addEventListener('click', function () { o.querySelector('input[type=radio]').checked = true; });
   });
 }
 
-// Submit Pre-Test
-function submitPretest() {
-  let score = 0;
-  let answered = 0;
-  
-  pretestData.forEach((q, index) => {
-    const selected = document.querySelector(`input[name="pq${index}"]:checked`);
-    const feedback = document.getElementById(`preFeedback${index}`);
-    const options = document.querySelectorAll(`.option[data-question="${index}"]`);
-    
-    if (selected) {
+function gradeQuiz(data, prefix, scoreId, msgId, resultId, btnId) {
+  var score = 0, answered = 0;
+  data.forEach(function (q, i) {
+    var sel = document.querySelector('input[name="' + prefix + i + '"]:checked');
+    var fb = document.getElementById(prefix + 'fb' + i);
+    var opts = document.querySelectorAll('.option[data-question="' + i + '"]');
+    if (sel) {
       answered++;
-      const selectedValue = parseInt(selected.value);
-      
-      options.forEach((opt, i) => {
-        opt.classList.remove('correct', 'incorrect');
-        if (i === q.correct) {
-          opt.classList.add('correct');
-        } else if (i === selectedValue && selectedValue !== q.correct) {
-          opt.classList.add('incorrect');
-        }
+      var sv = parseInt(sel.value);
+      opts.forEach(function (o, j) {
+        o.classList.remove('correct', 'incorrect');
+        if (j === q.correct) o.classList.add('correct');
+        else if (j === sv && sv !== q.correct) o.classList.add('incorrect');
       });
-      
-      if (selectedValue === q.correct) {
+      if (sv === q.correct) {
         score++;
-        feedback.className = 'feedback correct show';
-        feedback.innerHTML = `<strong>✓ Correct!</strong> ${q.explanation}`;
+        fb.className = 'feedback correct show';
+        fb.innerHTML = '<strong>Correct!</strong> ' + q.explanation;
       } else {
-        feedback.className = 'feedback incorrect show';
-        feedback.innerHTML = `<strong>✗ Incorrect.</strong> The correct answer is: <strong>${q.options[q.correct]}</strong><br><br>${q.explanation}`;
+        fb.className = 'feedback incorrect show';
+        fb.innerHTML = '<strong>Incorrect.</strong> Correct answer: <strong>' + q.options[q.correct] + '</strong><br><br>' + q.explanation;
       }
     }
   });
-  
-  if (answered < pretestData.length) {
-    alert(`Please answer all questions. You have answered ${answered} out of ${pretestData.length} questions.`);
+  if (answered < data.length) {
+    alert('Please answer all ' + data.length + ' questions. (' + answered + ' answered)');
     return;
   }
-  
-  const percentage = (score / pretestData.length * 100).toFixed(0);
-  document.getElementById('pretestScoreDisplay').textContent = `${score} / ${pretestData.length}`;
-  document.getElementById('pretestResultMessage').innerHTML = `
-    You scored ${percentage}%<br>
-    ${percentage >= 80 ? '🎉 Great foundation!' : percentage >= 60 ? '👍 Solid start!' : '📚 Review theory before proceeding!'}
-  `;
-  document.getElementById('pretestResult').classList.add('show');
-  document.getElementById('submitPretest').disabled = true;
-  
-  document.getElementById('pretestResult').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  var pct = (score / data.length * 100).toFixed(0);
+  document.getElementById(scoreId).textContent = score + ' / ' + data.length;
+  document.getElementById(msgId).innerHTML = 'You scored ' + pct + '%<br>' +
+    (pct >= 80 ? 'Excellent!' : pct >= 60 ? 'Good job!' : 'Keep practicing!');
+  document.getElementById(resultId).classList.add('show');
+  document.getElementById(btnId).disabled = true;
+  document.getElementById(resultId).scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
-// Retry Pre-Test
-function retryPretest() {
+/* ===== Init Quizzes ===== */
+buildQuiz(pretestData, 'pretestContainer', 'pq');
+
+document.getElementById('submitPretest').addEventListener('click', function () {
+  gradeQuiz(pretestData, 'pq', 'pretestScoreDisplay', 'pretestResultMessage', 'pretestResult', 'submitPretest');
+});
+
+document.getElementById('retryPretest').addEventListener('click', function () {
   document.getElementById('pretestResult').classList.remove('show');
   document.getElementById('submitPretest').disabled = false;
-  generatePretest();
+  buildQuiz(pretestData, 'pretestContainer', 'pq');
   window.scrollTo({ top: 0, behavior: 'smooth' });
-}
+});
 
-// Generate Post-Test
-function generateQuiz() {
-  const container = document.getElementById('quizContainer');
-  container.innerHTML = '';
-  
-  quizData.forEach((q, index) => {
-    const questionCard = document.createElement('div');
-    questionCard.className = 'question-card';
-    questionCard.innerHTML = `
-      <div class="question-number">Question ${index + 1}</div>
-      <div class="question-text">${q.question}</div>
-      <div class="options">
-        ${q.options.map((opt, i) => `
-          <div class="option" data-question="${index}" data-option="${i}">
-            <input type="radio" name="q${index}" id="q${index}_${i}" value="${i}">
-            <label for="q${index}_${i}">${opt}</label>
-          </div>
-        `).join('')}
-      </div>
-      <div class="feedback" id="feedback${index}"></div>
-    `;
-    container.appendChild(questionCard);
-  });
-  
-  document.querySelectorAll('.option').forEach(opt => {
-    opt.addEventListener('click', function() {
-      const radio = this.querySelector('input[type="radio"]');
-      radio.checked = true;
-    });
-  });
-}
+buildQuiz(quizData, 'quizContainer', 'q');
 
-// Submit Post-Test
-function submitQuiz() {
-  let score = 0;
-  let answered = 0;
-  
-  quizData.forEach((q, index) => {
-    const selected = document.querySelector(`input[name="q${index}"]:checked`);
-    const feedback = document.getElementById(`feedback${index}`);
-    const options = document.querySelectorAll(`.option[data-question="${index}"]`);
-    
-    if (selected) {
-      answered++;
-      const selectedValue = parseInt(selected.value);
-      
-      options.forEach((opt, i) => {
-        opt.classList.remove('correct', 'incorrect');
-        if (i === q.correct) {
-          opt.classList.add('correct');
-        } else if (i === selectedValue && selectedValue !== q.correct) {
-          opt.classList.add('incorrect');
-        }
-      });
-      
-      if (selectedValue === q.correct) {
-        score++;
-        feedback.className = 'feedback correct show';
-        feedback.innerHTML = `<strong>✓ Correct!</strong> ${q.explanation}`;
-      } else {
-        feedback.className = 'feedback incorrect show';
-        feedback.innerHTML = `<strong>✗ Incorrect.</strong> The correct answer is: <strong>${q.options[q.correct]}</strong><br><br>${q.explanation}`;
-      }
-    }
-  });
-  
-  if (answered < quizData.length) {
-    alert(`Please answer all questions. You have answered ${answered} out of ${quizData.length} questions.`);
-    return;
-  }
-  
-  const percentage = (score / quizData.length * 100).toFixed(0);
-  document.getElementById('scoreDisplay').textContent = `${score} / ${quizData.length}`;
-  document.getElementById('resultMessage').innerHTML = `
-    You scored ${percentage}%<br>
-    ${percentage >= 80 ? '🎉 Excellent work!' : percentage >= 60 ? '👍 Good job!' : '📚 Keep practicing!'}
-  `;
-  document.getElementById('quizResult').classList.add('show');
-  document.getElementById('submitQuiz').disabled = true;
-  
-  document.getElementById('quizResult').scrollIntoView({ behavior: 'smooth', block: 'center' });
-}
+document.getElementById('submitQuiz').addEventListener('click', function () {
+  gradeQuiz(quizData, 'q', 'scoreDisplay', 'resultMessage', 'quizResult', 'submitQuiz');
+});
 
-// Retry Post-Test
-function retryQuiz() {
+document.getElementById('retryQuiz').addEventListener('click', function () {
   document.getElementById('quizResult').classList.remove('show');
   document.getElementById('submitQuiz').disabled = false;
-  generateQuiz();
+  buildQuiz(quizData, 'quizContainer', 'q');
   window.scrollTo({ top: 0, behavior: 'smooth' });
-}
-
-// Initialize quizzes
-generatePretest();
-generateQuiz();
-
-// Attach event listeners
-document.getElementById('submitPretest').addEventListener('click', submitPretest);
-document.getElementById('retryPretest').addEventListener('click', retryPretest);
-document.getElementById('submitQuiz').addEventListener('click', submitQuiz);
-document.getElementById('retryQuiz').addEventListener('click', retryQuiz);
-
-// PCM Simulation Code
-function grayEncode(n){ return n^(n>>1); }
-
-function generateSignal(A,fm,Fs,signalType){
-  const N = Fs*0.04;
-  const t = [...Array(N)].map((_,i)=>i/Fs);
-  let x=[];
-  if(signalType==="sine")
-    x=t.map(time=>A*Math.sin(2*Math.PI*fm*time));
-  else if(signalType==="cosine")
-    x=t.map(time=>A*Math.cos(2*Math.PI*fm*time));
-  else {
-    let noise = t.map(()=>Math.random()*2-1);
-    for(let k=0;k<3;k++){
-      noise=noise.map((v,i,arr)=>(arr[i-1]||0)+v+(arr[i+1]||0)/3);
-    }
-    x=noise.map(v=>v*A);
-  }
-  return {t,x};
-}
-
-function sampleSignal(t,x,Fs,Fsamp){
-  const step = Math.max(1, Math.floor(Fs/Fsamp));
-  const ts=[], xs=[];
-  for(let i=0; i<x.length; i+=step){
-    ts.push(t[i]); xs.push(x[i]);
-  }
-  return {ts,xs};
-}
-
-function quantizeFullSignal(t, x, L, A) {
-  const delta = (2 * A) / L;
-  const q = [];
-  const levels = [];
-  x.forEach(v => {
-    let lvl = Math.floor((v + A) / delta);
-    lvl = Math.max(0, Math.min(L - 1, lvl));
-    const qv = -A + (lvl + 0.5) * delta;
-    q.push(qv);
-    levels.push(lvl);
-  });
-  return { q, levels };
-}
-
-function buildStaircase(t, q) {
-  const sx = [];
-  const sy = [];
-  for (let i = 0; i < q.length - 1; i++) {
-    sx.push(t[i]);
-    sy.push(q[i]);
-    if (q[i] !== q[i + 1]) {
-      sx.push(t[i + 1]);
-      sy.push(q[i]);
-    }
-  }
-  sx.push(t[t.length - 1]);
-  sy.push(q[q.length - 1]);
-  return { sx, sy };
-}
-
-function encode(levels,L,enc){
-  const nBits=Math.ceil(Math.log2(L));
-  return levels.map(l=>{
-    const val = enc==="gray" ? grayEncode(l) : l;
-    return val.toString(2).padStart(nBits,"0");
-  });
-}
-
-function reconstruct(qx,ts,t){
-  return t.map(tt=>{
-    const idx=ts.findIndex(x=>x>tt);
-    const i = (idx===-1?ts.length-1:Math.max(0,idx-1));
-    return qx[i];
-  });
-}
-
-function buildZOH(ts, xs, t) {
-  const y = [];
-  let k = 0;
-  for (let i = 0; i < t.length; i++) {
-    if (k < ts.length - 1 && t[i] >= ts[k + 1]) {
-      k++;
-    }
-    y.push(xs[k]);
-  }
-  return y;
-}
-
-function createStemPlot(ts, xs) {
-  const stemX = [];
-  const stemY = [];
-  ts.forEach((t, i) => {
-    stemX.push(t, t, null);
-    stemY.push(0, xs[i], null);
-  });
-  
-  return {
-    stems: {
-      x: stemX,
-      y: stemY,
-      mode: 'lines',
-      line: { color: 'orange', width: 2 },
-      name: 'Stems',
-      showlegend: false
-    },
-    markers: {
-      x: ts,
-      y: xs,
-      mode: 'markers',
-      marker: { color: 'red', size: 8, symbol: 'circle' },
-      name: 'Samples'
-    }
-  };
-}
-
-function getGridLayout(A, L) {
-  const delta = (2 * A) / L;
-  const yGridValues = [];
-  for (let i = 0; i <= L; i++) {
-    yGridValues.push(-A + i * delta);
-  }
-  
-  return {
-    yGridValues: yGridValues,
-    delta: delta
-  };
-}
-
-function updateQuantizationLevelsDisplay(A, L, enc) {
-  const delta = (2 * A) / L;
-  const levelsTable = document.getElementById('levelsTable');
-  let html = '<table style="width: 100%; color: #e0e0e0; font-size: 12px; border-collapse: collapse;">';
-  html += '<tr style="border-bottom: 1px solid var(--cyan); color: var(--cyan); font-weight: bold;"><th style="padding: 5px;">Level</th><th style="padding: 5px;">Voltage (V)</th><th style="padding: 5px;">Code</th></tr>';
-  
-  for (let i = L - 1; i >= 0; i--) {
-    const voltage = (-A + (i + 0.5) * delta).toFixed(3);
-    const binaryCode = i.toString(2).padStart(Math.ceil(Math.log2(L)), '0');
-    const grayCode = (i ^ (i >> 1)).toString(2).padStart(Math.ceil(Math.log2(L)), '0');
-    const code = enc === 'gray' ? grayCode : binaryCode;
-    
-    html += `<tr style="border-bottom: 1px solid rgba(0, 217, 255, 0.1);">
-      <td style="padding: 5px; text-align: center; color: var(--cyan);">${i}</td>
-      <td style="padding: 5px; text-align: center;">${voltage}</td>
-      <td style="padding: 5px; text-align: center; font-family: monospace; color: #ffaa00;">${code}</td>
-    </tr>`;
-  }
-  
-  html += '</table>';
-  html += `<div style="margin-top: 10px; padding: 8px; background: var(--navy); border-radius: 4px; font-size: 11px; text-align: center;">
-    <div style="color: var(--cyan); font-weight: bold;">Step Size (Δ)</div>
-    <div style="color: #ffaa00; font-size: 14px; margin-top: 3px;">${delta.toFixed(4)} V</div>
-  </div>`;
-  
-  levelsTable.innerHTML = html;
-}
-
-function updatePlots() {
-  const A = +msgAmp.value;
-  const fm = +msgFreq.value;
-  const Fsamp = +sampFreq.value;
-  const L = +quantLevels.value;
-  const enc = encodingType.value;
-  const signalType = document.getElementById("signalType").value;
-
-  const ratio = (Fsamp / fm).toFixed(2);
-  const nyquistRate = 2 * fm;
-  
-  document.getElementById('ratioText').innerHTML = 
-    `<strong>Fs/Fm Ratio:</strong> ${ratio} &nbsp;&nbsp;|&nbsp;&nbsp; <strong>Sampling Freq:</strong> ${Fsamp} Hz &nbsp;&nbsp;|&nbsp;&nbsp; <strong>Message Freq:</strong> ${fm} Hz`;
-  
-  const statusDiv = document.getElementById('nyquistStatus');
-  if (Fsamp < nyquistRate) {
-    statusDiv.innerHTML = `<span style="color:red; font-weight:bold;">⚠️ WARNING: Sampling frequency (${Fsamp} Hz) < Nyquist rate (${nyquistRate} Hz). Aliasing will occur!</span>`;
-    statusDiv.style.background = '#ffe6e6';
-    statusDiv.style.padding = '8px';
-    statusDiv.style.borderRadius = '4px';
-  } else {
-    statusDiv.innerHTML = `<span style="color:green; font-weight:bold;">✓ Good: Sampling frequency meets Nyquist criterion (${nyquistRate} Hz required)</span>`;
-    statusDiv.style.background = '#e6ffe6';
-    statusDiv.style.padding = '8px';
-    statusDiv.style.borderRadius = '4px';
-  }
-
-  updateQuantizationLevelsDisplay(A, L, enc);
-
-  const Fs = 8000;
-  const { t, x } = generateSignal(A, fm, Fs, signalType);
-  const { ts, xs } = sampleSignal(t, x, Fs, Fsamp);
-  const { q: qFull, levels: levelsFull } = quantizeFullSignal(t, x, L, A);
-  const { q: qSample, levels: levelsSample } = quantizeFullSignal(ts, xs, L, A);
-  const decodedSignal = qSample;
-
-  const encoded = encode(levelsSample, L, enc);
-  const xr = reconstruct(qSample, ts, t);
-
-  const gridLayout = getGridLayout(A, L);
-  
-  const mode1 = document.querySelector(".ch1-btn.active").dataset.type;
-  
-  // Show/hide quantization levels box
-  const quantBox = document.getElementById('quantLevelsDisplay');
-  if (mode1 === "quantized") {
-    quantBox.classList.add('visible');
-  } else {
-    quantBox.classList.remove('visible');
-  }
-  
-  let d1 = [];
-  let layout1 = {
-    margin: { t: 20 },
-    xaxis: { 
-      title: "",
-      tickmode: 'array',
-      tickvals: [t[0], t[t.length - 1]],
-      ticktext: ['Start', 'End'],
-      gridcolor: 'rgba(0, 217, 255, 0.15)',
-      gridwidth: 1
-    },
-    yaxis: { 
-      title: "Amplitude (V)",
-      tickmode: 'array',
-      tickvals: [A, A/2, 0, -A/2, -A],
-      ticktext: [
-        `${A.toFixed(1)}`,
-        `${(A/2).toFixed(1)}`,
-        '0',
-        `${(-A/2).toFixed(1)}`,
-        `${(-A).toFixed(1)}`
-      ],
-      gridcolor: 'rgba(0, 217, 255, 0.15)',
-      gridwidth: 1,
-      range: [-A * 1.1, A * 1.1]
-    },
-    plot_bgcolor: '#1a2332',
-    paper_bgcolor: '#1a2332',
-    font: { color: '#ffffff' },
-    shapes: []
-  };
-
-  if (mode1 === "input") {
-    d1 = [{
-      x: t,
-      y: x,
-      mode: 'lines',
-      line: { color: 'green' },
-      name: 'Input signal'
-    }];
-  }
-  else if (mode1 === "sampled") {
-    const stemPlot = createStemPlot(ts, xs);
-    d1 = [
-      stemPlot.stems,
-      stemPlot.markers
-    ];
-  }
-  else if (mode1 === "quantized") {
-    const { sx, sy } = buildStaircase(t, qFull);
-    d1 = [
-      { x: t, y: x, mode: "lines", line: { color: "green", width: 2 }, name: 'Original' },
-      { x: sx, y: sy, mode: "lines", line: { color: "red", width: 3, shape: "hv" }, name: 'Quantized' }
-    ];
-    
-    // Add horizontal grid lines for quantization levels
-    layout1.shapes = gridLayout.yGridValues.map(yVal => ({
-      type: 'line',
-      x0: t[0],
-      x1: t[t.length - 1],
-      y0: yVal,
-      y1: yVal,
-      line: {
-        color: 'rgba(0, 217, 255, 0.15)',
-        width: 1,
-        dash: 'dot'
-      }
-    }));
-  }
-  else if (mode1 === "encoded") {
-    const bits = encoded.join("").split("").map(b => +b);
-    const time = bits.map((_, i) => i / bits.length);
-    
-    d1 = [{
-      x: time,
-      y: bits,
-      mode: 'lines',
-      line: { shape: 'hv', color: 'magenta' },
-      name: 'Encoded'
-    }];
-    
-    layout1.yaxis = {
-      title: "Bit Value",
-      tickmode: 'array',
-      tickvals: [0, 1],
-      ticktext: ['0', '1'],
-      gridcolor: 'rgba(0, 217, 255, 0.15)'
-    };
-
-    layout1.xaxis = {
-      title: "Normalized Time",
-      tickmode: 'array',
-      tickvals: [0, 1],
-      ticktext: ['Start', 'End'],
-      range: [-0.05, 1.05],
-      gridcolor: 'rgba(0, 217, 255, 0.15)',
-      gridwidth: 1
-    };
-  }
-
-  Plotly.react("plot1", d1, layout1);
-
-  const mode2 = document.querySelector(".ch2-btn.active").dataset.type;
-  let d2 = [];
-  let layout2 = {
-    margin: { t: 20 },
-    xaxis: { 
-      title: "",
-      tickmode: 'array',
-      tickvals: [t[0], t[t.length - 1]],
-      ticktext: ['Start', 'End'],
-      gridcolor: 'rgba(0, 217, 255, 0.15)',
-      gridwidth: 1
-    },
-    yaxis: { 
-      title: "Amplitude (V)",
-      tickmode: 'array',
-      tickvals: [A, A/2, 0, -A/2, -A],
-      ticktext: [
-        `${A.toFixed(1)}`,
-        `${(A/2).toFixed(1)}`,
-        '0',
-        `${(-A/2).toFixed(1)}`,
-        `${(-A).toFixed(1)}`
-      ],
-      gridcolor: 'rgba(0, 217, 255, 0.15)',
-      gridwidth: 1,
-      range: [-A * 1.1, A * 1.1]
-    },
-    plot_bgcolor: '#1a2332',
-    paper_bgcolor: '#1a2332',
-    font: { color: '#ffffff' }
-  };
-
-  if (mode2 === "reconstructed") {
-    d2 = [
-      { x: t, y: x, mode: 'lines', line: { color: 'green' }, name: 'Original signal' }
-    ];
-  }
-  else if (mode2 === "decoded") {
-    const decodedZOH = buildZOH(ts, qSample, t);
-    d2 = [
-      {
-        x: t,
-        y: decodedZOH,
-        mode: "lines",
-        line: { shape: "hv", color: "red", width: 3 },
-        name: "Decoded (DAC output)"
-      }
-    ];
-  }
-
-  Plotly.react("plot2", d2, layout2);
-}
-
-document.getElementById("simulateBtn").onclick = updatePlots;
-
-document.querySelectorAll(".ch1-btn").forEach(btn=>{
-  btn.onclick = () => {
-    document.querySelectorAll(".ch1-btn").forEach(b=>b.classList.remove("active"));
-    btn.classList.add("active");
-    updatePlots();
-  };
 });
 
-document.querySelectorAll(".ch2-btn").forEach(btn=>{
-  btn.onclick = () => {
-    document.querySelectorAll(".ch2-btn").forEach(b=>b.classList.remove("active"));
-    btn.classList.add("active");
-    updatePlots();
-  };
+/* ===== Help Popup ===== */
+document.getElementById('helpBtn').addEventListener('click', function () {
+  document.getElementById('helpPopup').style.display = 'block';
 });
 
-updatePlots();
+document.getElementById('closeHelp').addEventListener('click', function () {
+  document.getElementById('helpPopup').style.display = 'none';
+});
+
+/* ===== Presets ===== */
+function applyNyquistGood() {
+  document.getElementById('msgFreqSlider').value = 100;
+  document.getElementById('msgFreqUnit').value = 1;
+  document.getElementById('sampFreqSlider').value = 1000;
+  document.getElementById('sampFreqUnit').value = 1;
+  refreshMsgLabel(); refreshSampLabel(); updatePlots();
+}
+
+function applyNyquistBad() {
+  document.getElementById('msgFreqSlider').value = 300;
+  document.getElementById('msgFreqUnit').value = 1;
+  document.getElementById('sampFreqSlider').value = 400;
+  document.getElementById('sampFreqUnit').value = 1;
+  refreshMsgLabel(); refreshSampLabel(); updatePlots();
+}
+
+/* ===== Load ===== */
+window.addEventListener('load', function () {
+  if (document.getElementById('simulation').classList.contains('active')) updatePlots();
+});
