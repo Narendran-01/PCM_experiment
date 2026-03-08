@@ -695,6 +695,8 @@ section li {
   border-radius: 12px;
   padding: 24px;
   margin-bottom: 20px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .proc-card-full .proc-step-header {
